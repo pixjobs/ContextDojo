@@ -1,0 +1,7 @@
+{
+  "name": "ContextDojo",
+  "description": "A conversational skills coach for young adults helping with interviews, social chit-chat, and deep discussions.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
