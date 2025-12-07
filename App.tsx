@@ -375,8 +375,8 @@ function App() {
                 </button>
                 
                 {openSection === 'map' && (
-                    <div className="flex-1 min-h-0 relative overflow-hidden rounded-b-xl animate-fade-in">
-                       <div className="absolute inset-0 bg-grid-slate-800/[0.05] bg-[bottom_1px_center]" style={{ backgroundSize: '24px 24px' }}></div>
+                    <div className="flex-1 min-h-0 relative overflow-hidden rounded-b-xl animate-fade-in flex flex-col">
+                       {/* Map Container now manages its own scrolling */}
                        <MindMap 
                           nodes={dojoState.mindMapNodes} 
                           links={dojoState.mindMapLinks} 

@@ -169,7 +169,7 @@ export const generateGraphUpdates = async (
         2. Identify 2-3 **Potential Avenues** or tangent topics derived from this Primary Topic that would be interesting to explore next (Status: 'potential').
         
         RULES:
-        - Labels must be concise (1-3 words).
+        - Labels should be **short descriptive phrases** (2-6 words) to clearly summarizing the point (e.g. "Feeling nervous about interviews" instead of "Nerves").
         - 'parent': Match strictly to one of the [Recent Nodes]. If no good match, use 'Context'.
         - 'type': 'concept', 'entity', 'action', 'emotion'.
         - 'description': A short, 1-sentence hint on what to discuss or why this topic is relevant.

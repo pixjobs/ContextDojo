@@ -34,7 +34,7 @@ const MindMap: React.FC<MindMapProps> = ({ nodes, links, labels }) => {
       const depths: Record<string, number> = {};
       const adj: Record<string, string[]> = {};
       
-      // Build adjacency list safely, handling both string and object sources
+      // Build adjacency list
       linkList.forEach(l => {
           const s = typeof l.source === 'object' ? (l.source as any).id : l.source;
           const t = typeof l.target === 'object' ? (l.target as any).id : l.target;
@@ -46,9 +46,11 @@ const MindMap: React.FC<MindMapProps> = ({ nodes, links, labels }) => {
       const queue: { id: string, d: number }[] = [{ id: 'Context', d: 0 }];
       depths['Context'] = 0;
       const visited = new Set(['Context']);
+      let maxDepth = 0;
 
       while (queue.length > 0) {
           const { id, d } = queue.shift()!;
+          maxDepth = Math.max(maxDepth, d);
           if (adj[id]) {
               adj[id].forEach(childId => {
                   if (!visited.has(childId)) {
@@ -59,7 +61,7 @@ const MindMap: React.FC<MindMapProps> = ({ nodes, links, labels }) => {
               });
           }
       }
-      return depths;
+      return { depths, maxDepth };
   };
 
   // Helper to find path from a specific node back to root
@@ -71,7 +73,6 @@ const MindMap: React.FC<MindMapProps> = ({ nodes, links, labels }) => {
       
       while(foundParent && iterations < 100) {
           foundParent = false;
-          // Find a link where target == currentId
           const parentLink = currentLinks.find(l => {
               const t = typeof l.target === 'object' ? (l.target as any).id : l.target;
               return t === currentId;
@@ -100,210 +101,210 @@ const MindMap: React.FC<MindMapProps> = ({ nodes, links, labels }) => {
     if (!svgRef.current || !containerRef.current) return;
     if (nodes.length === 0) return;
 
-    const width = containerRef.current.clientWidth || 800;
-    // We don't limit height for simulation physics to avoid clamping bunch-up
+    const containerWidth = containerRef.current.clientWidth || 800;
     
-    // --- 1. DATA PREPARATION ---
-    // Deep clone to ensure D3 never mutates React props. 
+    // --- 1. COMPUTE DEPTHS FOR LAYOUT ---
+    const { depths, maxDepth } = computeDepths(nodes, links);
+    
+    // Calculate Dynamic Height based on tree depth
+    const Y_SPACING = 120; // Vertical space between tiers
+    const MIN_HEIGHT = 400;
+    const PADDING_TOP = 60;
+    const PADDING_BOTTOM = 60;
+    
+    const requiredHeight = Math.max(MIN_HEIGHT, (maxDepth * Y_SPACING) + PADDING_TOP + PADDING_BOTTOM);
+
+    // Resize SVG container dynamically
+    const svg = d3.select(svgRef.current);
+    svg.attr("height", requiredHeight);
+
+    // --- 2. DATA PREPARATION ---
     const simulationNodes = nodes.map(n => {
         const oldPos = nodePositions.current.get(n.id);
+        const depth = depths[n.id] ?? 0;
         return { 
             ...n, 
-            // Preserve position if exists, else start centered top
-            x: oldPos ? oldPos.x : width / 2, 
-            y: oldPos ? oldPos.y : 50,
+            // Start near their target depth so they don't fly across screen
+            x: oldPos ? oldPos.x : containerWidth / 2, 
+            y: oldPos ? oldPos.y : (depth * Y_SPACING) + PADDING_TOP,
             vx: oldPos ? oldPos.vx : 0,
             vy: oldPos ? oldPos.vy : 0
         };
     }) as d3.SimulationNodeDatum[];
 
-    // Ensure links are fresh objects with string IDs for D3 to resolve
     const simulationLinks = links.map(l => ({
         source: typeof l.source === 'object' ? (l.source as any).id : l.source,
         target: typeof l.target === 'object' ? (l.target as any).id : l.target
     }));
 
-    // Clear previous SVG
-    const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove(); 
 
-    // Define Arrow Marker
+    // --- 3. DEFINITIONS ---
     const defs = svg.append("defs");
-    
+    // Standard arrow
     defs.append("marker")
         .attr("id", "arrowhead")
         .attr("viewBox", "0 -5 10 10")
-        .attr("refX", 25) // Distance from node center
+        .attr("refX", 18) // Distance adapted for Rect
+        .attr("refY", 0)
+        .attr("markerWidth", 5)
+        .attr("markerHeight", 5)
+        .attr("orient", "auto")
+        .append("path")
+        .attr("d", "M0,-5L10,0L0,5")
+        .attr("fill", "#64748b");
+
+    // Active Arrow
+    defs.append("marker")
+        .attr("id", "arrowhead-active")
+        .attr("viewBox", "0 -5 10 10")
+        .attr("refX", 18) 
         .attr("refY", 0)
         .attr("markerWidth", 6)
         .attr("markerHeight", 6)
         .attr("orient", "auto")
         .append("path")
         .attr("d", "M0,-5L10,0L0,5")
-        .attr("fill", "#64748b");
-
-    defs.append("marker")
-        .attr("id", "arrowhead-active")
-        .attr("viewBox", "0 -5 10 10")
-        .attr("refX", 25)
-        .attr("refY", 0)
-        .attr("markerWidth", 8)
-        .attr("markerHeight", 8)
-        .attr("orient", "auto")
-        .append("path")
-        .attr("d", "M0,-5L10,0L0,5")
         .attr("fill", "#38bdf8");
 
-    // Compute Depths for Y-positioning
-    const depths = computeDepths(nodes, links);
-
-    // --- 2. SIMULATION SETUP ---
+    // --- 4. SIMULATION ---
     const simulation = d3.forceSimulation(simulationNodes)
-      .force("link", d3.forceLink(simulationLinks).id((d: any) => d.id).distance(80)) 
-      .force("charge", d3.forceManyBody().strength(-500)) 
-      .force("collide", d3.forceCollide().radius(40))
-      // TOP-DOWN Tree Force
+      .force("link", d3.forceLink(simulationLinks).id((d: any) => d.id).distance(100)) 
+      .force("charge", d3.forceManyBody().strength(-300)) 
+      .force("collide", d3.forceCollide().radius(60).iterations(2))
+      // STRICT Y-FORCE for Chronology/Tree structure
       .force("y", d3.forceY((d: any) => {
           const dDepth = depths[d.id] ?? 0;
-          return 60 + (dDepth * 100); 
-      }).strength(2)) 
-      .force("x", d3.forceX(width / 2).strength(0.15));
+          return (dDepth * Y_SPACING) + PADDING_TOP; 
+      }).strength(2.5)) 
+      // Gentle X-Force to center
+      .force("x", d3.forceX(containerWidth / 2).strength(0.08));
 
     simulationRef.current = simulation;
 
-    // --- 3. RENDERING ---
-    const g = svg.append("g"); // Main group for zoom
+    // --- 5. RENDER ELEMENTS ---
+    const g = svg.append("g"); 
 
-    // Links
+    // Links (Curves)
     const link = g.append("g")
-      .selectAll("line")
+      .selectAll("path")
       .data(simulationLinks)
-      .join("line")
+      .join("path")
+      .attr("fill", "none")
       .attr("stroke", (d: any) => {
           const s = d.source.id || d.source;
           const t = d.target.id || d.target;
           if (highlightSet.has(s) && highlightSet.has(t)) return "#38bdf8"; 
-          return "#475569";
+          return "#334155";
       })
       .attr("stroke-width", (d: any) => {
           const s = d.source.id || d.source;
           const t = d.target.id || d.target;
-          if (highlightSet.has(s) && highlightSet.has(t)) return 3;
-          return 1.5;
-      })
-      .attr("marker-end", (d: any) => {
-           const s = d.source.id || d.source;
-           const t = d.target.id || d.target;
-           if (highlightSet.has(s) && highlightSet.has(t)) return "url(#arrowhead-active)";
-           return "url(#arrowhead)";
+          if (highlightSet.has(s) && highlightSet.has(t)) return 2;
+          return 1;
       });
 
-    // Node Groups
+    // Nodes (Groups)
     const node = g.append("g")
       .selectAll("g")
       .data(simulationNodes)
       .join("g")
-      .attr("class", "cursor-pointer")
+      .attr("class", "cursor-pointer transition-opacity duration-300")
       .attr("opacity", (d: any) => {
-           if (selectedNode && !highlightSet.has(d.id)) return 0.3;
+           if (selectedNode && !highlightSet.has(d.id)) return 0.2;
            return 1;
       })
       .on("click", (event, d: any) => {
           event.stopPropagation();
           const original = nodes.find(n => n.id === d.id);
           if (original) setSelectedNode(original);
-      })
-      .call(d3.drag<SVGGElement, any>()
-        .on("start", dragstarted)
-        .on("drag", dragged)
-        .on("end", dragended)
-      );
+      });
+      // Removing drag behavior to maintain strict chronological Y-positions
 
-    // Node Circles
-    node.append("circle")
-      .attr("r", (d: any) => d.type === 'root' ? 18 : 12)
-      .attr("fill", (d: any) => {
-          if (highlightSet.has(d.id)) return (COLORS as any)[d.type];
-          return d.status === 'potential' ? '#0f172a' : (COLORS as any)[d.type];
-      })
-      .attr("stroke", (d: any) => {
-           if (highlightSet.has(d.id)) return "#e0f2fe"; 
-           return (COLORS as any)[d.type];
-      })
-      .attr("stroke-width", (d: any) => {
-          if (highlightSet.has(d.id)) return 3;
-          return d.status === 'potential' ? 2 : 2;
-      })
-      .attr("stroke-dasharray", (d: any) => d.status === 'potential' ? "3 2" : "none");
+    // --- CAPSULE SHAPE ---
+    // We render Text first to measure it, OR just approximate with padding
+    // Let's use fixed height rects with padding based on text length estimation
+    
+    node.each(function(d: any) {
+        const el = d3.select(this);
+        const charCount = d.label.length;
+        const rectWidth = Math.max(100, charCount * 7 + 24); // Dynamic width
+        const rectHeight = 36;
+        
+        // Save width for tick updates
+        d.width = rectWidth;
+        d.height = rectHeight;
 
-    // Labels
-    node.append("text")
-      .text((d: any) => d.label)
-      .attr("x", 18)
-      .attr("y", 4)
-      .attr("fill", (d: any) => {
-          if (highlightSet.has(d.id)) return "#ffffff";
-          return d.status === 'potential' ? "#94a3b8" : "#f1f5f9";
-      })
-      .attr("font-size", "11px")
-      .attr("font-weight", (d: any) => d.status === 'active' || highlightSet.has(d.id) ? "700" : "500")
-      .attr("font-family", "system-ui, sans-serif")
-      .style("pointer-events", "none")
-      .style("text-shadow", "0 1px 3px rgba(0,0,0,0.8)");
+        el.append("rect")
+            .attr("rx", 18) // Pill shape
+            .attr("ry", 18)
+            .attr("x", -rectWidth / 2)
+            .attr("y", -rectHeight / 2)
+            .attr("width", rectWidth)
+            .attr("height", rectHeight)
+            .attr("fill", (d: any) => {
+                if (highlightSet.has(d.id)) return (COLORS as any)[d.type] + '40'; // Transparent bg when active
+                return "#1e293b"; // Dark slate
+            })
+            .attr("stroke", (d: any) => {
+                if (highlightSet.has(d.id)) return "#e0f2fe"; 
+                return (COLORS as any)[d.type] || COLORS.default;
+            })
+            .attr("stroke-width", (d: any) => {
+                if (highlightSet.has(d.id)) return 2;
+                return d.status === 'potential' ? 1 : 2;
+            })
+            .attr("stroke-dasharray", (d: any) => d.status === 'potential' ? "4 2" : "none");
 
-    // Ticks
+        el.append("text")
+            .text(d.label)
+            .attr("dy", "0.35em")
+            .attr("text-anchor", "middle")
+            .attr("fill", (d: any) => {
+                if (highlightSet.has(d.id)) return "#ffffff";
+                return d.status === 'potential' ? "#94a3b8" : "#f1f5f9";
+            })
+            .attr("font-size", "12px")
+            .attr("font-weight", (d: any) => d.status === 'active' || highlightSet.has(d.id) ? "600" : "400")
+            .style("pointer-events", "none");
+    });
+
+    // Simulation Tick
     simulation.on("tick", () => {
-      // Clamping X only, let Y flow freely so tree doesn't smash
-      const padding = 30;
+      const padding = 20;
       
       node.each((d: any) => {
-          d.x = Math.max(padding, Math.min(width - padding, d.x));
-          // d.y is NOT clamped to height to allow deep trees. 
-          // We only clamp top to avoid flying off header.
-          d.y = Math.max(padding, d.y);
+          // Clamp X to stay in container
+          const w = d.width || 100;
+          d.x = Math.max(w/2 + padding, Math.min(containerWidth - w/2 - padding, d.x));
           
+          // d.y is constrained by ForceY primarily, but we update cache
           nodePositions.current.set(d.id, { x: d.x, y: d.y, vx: d.vx, vy: d.vy });
       });
 
-      link
-        .attr("x1", (d: any) => d.source.x)
-        .attr("y1", (d: any) => d.source.y)
-        .attr("x2", (d: any) => d.target.x)
-        .attr("y2", (d: any) => d.target.y);
+      // Update Curved Links (Bezier for tree-like feel)
+      link.attr("d", (d: any) => {
+        const sourceX = d.source.x;
+        const sourceY = d.source.y + (d.source.height / 2); // Start from bottom of pill
+        const targetX = d.target.x;
+        const targetY = d.target.y - (d.target.height / 2); // End at top of pill
+        
+        // Cubic Bezier for smooth vertical flow
+        return `M${sourceX},${sourceY} 
+                C${sourceX},${(sourceY + targetY) / 2} 
+                 ${targetX},${(sourceY + targetY) / 2} 
+                 ${targetX},${targetY}`;
+      });
 
-      node
-        .attr("transform", (d: any) => `translate(${d.x},${d.y})`);
+      node.attr("transform", (d: any) => `translate(${d.x},${d.y})`);
+      
+      // Auto-scroll to bottom on first load or significant change
+      if (containerRef.current && nodes.length > 1) {
+          // Only scroll if user isn't actively scrolling up? 
+          // For now, let's just gently ensure bottom is visible if it's new
+          // containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      }
     });
-
-    // Zoom
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
-        .scaleExtent([0.2, 4])
-        .on("zoom", (event) => {
-            g.attr("transform", event.transform);
-        });
-    // @ts-ignore
-    svg.call(zoom);
-
-    // Initial Zoom transform to center top if needed, or just identity
-    // If the tree is huge, users can pan.
-    
-    // Drag functions
-    function dragstarted(event: any, d: any) {
-      if (!event.active) simulation.alphaTarget(0.3).restart();
-      d.fx = d.x;
-      d.fy = d.y;
-    }
-
-    function dragged(event: any, d: any) {
-      d.fx = event.x;
-      d.fy = event.y;
-    }
-
-    function dragended(event: any, d: any) {
-      if (!event.active) simulation.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
-    }
 
     return () => {
       simulation.stop();
@@ -316,9 +317,9 @@ const MindMap: React.FC<MindMapProps> = ({ nodes, links, labels }) => {
     <div 
         ref={containerRef} 
         onClick={handleBgClick}
-        className="w-full h-full min-h-[400px] overflow-hidden bg-slate-900 border-t border-slate-700 relative"
+        className="w-full h-full min-h-[400px] overflow-y-auto overflow-x-hidden bg-slate-900 border-t border-slate-700 relative scrollbar-thin scrollbar-thumb-slate-700"
     >
-      <div className="absolute top-3 left-3 flex flex-col gap-2 pointer-events-none opacity-90 z-10">
+      <div className="absolute top-3 left-3 flex flex-col gap-2 pointer-events-none opacity-90 z-10 sticky">
           <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 rounded-full bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.8)]"></span>
               <span className="text-[10px] text-slate-300 font-bold tracking-wide uppercase">{labels.legendDiscussed}</span>
@@ -329,13 +330,13 @@ const MindMap: React.FC<MindMapProps> = ({ nodes, links, labels }) => {
           </div>
       </div>
 
-      <svg ref={svgRef} className="w-full h-full cursor-grab active:cursor-grabbing"></svg>
+      <svg ref={svgRef} className="w-full block min-h-full"></svg>
 
-      {/* Insight Card Overlay */}
+      {/* Insight Card Overlay (Sticky at bottom) */}
       {selectedNode && (
           <div 
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-4 left-4 right-4 bg-slate-800/95 backdrop-blur-md border border-slate-600 rounded-xl p-4 shadow-2xl animate-fade-in z-20 flex flex-col gap-2"
+            className="sticky bottom-4 left-4 right-4 mx-4 bg-slate-800/95 backdrop-blur-md border border-slate-600 rounded-xl p-4 shadow-2xl animate-fade-in z-20 flex flex-col gap-2 mb-4"
           >
               <div className="flex justify-between items-start">
                   <div className="flex items-center gap-2">
