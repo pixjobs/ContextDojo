@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Conversation } from '@11labs/client';
+import { LabelSet } from '../constants/translations';
 
 // TODO: Paste your Agent ID here for the Hackathon Demo
 const DEMO_AGENT_ID = ""; 
@@ -7,18 +8,22 @@ const DEMO_AGENT_ID = "";
 interface VoiceWidgetProps {
   onUserTranscript: (text: string) => void;
   onAgentResponse: (text: string) => void;
-  onAgentStartedSpeaking: () => void;
-  onAgentStoppedSpeaking: () => void;
+  onUserTurnComplete: (text: string) => void; // Commits user text to history
+  onTurnComplete: () => void; // Commits agent text to history & triggers analysis
+  labels: LabelSet;
 }
 
 const VoiceWidget: React.FC<VoiceWidgetProps> = ({ 
     onUserTranscript, 
     onAgentResponse, 
-    onAgentStartedSpeaking, 
-    onAgentStoppedSpeaking 
+    onUserTurnComplete,
+    onTurnComplete,
+    labels 
 }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [statusMsg, setStatusMsg] = useState('');
+  
   const [agentId, setAgentId] = useState(() => {
     if (typeof window !== 'undefined') {
         const stored = localStorage.getItem('elevenlabs_agent_id');
@@ -29,80 +34,114 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
 
   const [showConfig, setShowConfig] = useState(!agentId);
   const conversationRef = useRef<any>(null);
-  const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Refs for callbacks to avoid stale closures
-  const callbacksRef = useRef({
-      onUserTranscript,
-      onAgentResponse,
-      onAgentStartedSpeaking,
-      onAgentStoppedSpeaking
-  });
-
-  useEffect(() => {
-    callbacksRef.current = {
-        onUserTranscript,
-        onAgentResponse,
-        onAgentStartedSpeaking,
-        onAgentStoppedSpeaking
-    };
-  }, [onUserTranscript, onAgentResponse, onAgentStartedSpeaking, onAgentStoppedSpeaking]);
+  // Data Refs to accumulate speech during a turn
+  const userSpeechBuffer = useRef<string>('');
+  
+  // Callbacks refs
+  const onUserTranscriptRef = useRef(onUserTranscript);
+  const onAgentResponseRef = useRef(onAgentResponse);
+  const onUserTurnCompleteRef = useRef(onUserTurnComplete);
+  const onTurnCompleteRef = useRef(onTurnComplete);
 
   useEffect(() => {
-     if (agentId) localStorage.setItem('elevenlabs_agent_id', agentId);
+    onUserTranscriptRef.current = onUserTranscript;
+    onAgentResponseRef.current = onAgentResponse;
+    onUserTurnCompleteRef.current = onUserTurnComplete;
+    onTurnCompleteRef.current = onTurnComplete;
+  }, [onUserTranscript, onAgentResponse, onUserTurnComplete, onTurnComplete]);
+
+  useEffect(() => {
+     if (agentId) {
+         localStorage.setItem('elevenlabs_agent_id', agentId);
+     }
   }, [agentId]);
 
   useEffect(() => {
     return () => {
-      if (conversationRef.current) conversationRef.current.endSession();
+      if (conversationRef.current) {
+        conversationRef.current.endSession();
+      }
     };
   }, []);
 
-  const startConversation = async () => {
-    if (!agentId) { setShowConfig(true); return; }
+  const startConversation = useCallback(async () => {
+    if (!agentId) {
+        setShowConfig(true);
+        return;
+    }
 
     try {
+      setStatusMsg('Requesting Mic...');
+      // Explicitly ask for mic permission first to avoid SDK timeout issues
       await navigator.mediaDevices.getUserMedia({ audio: true });
 
+      setStatusMsg('Connecting...');
+      console.log("[ContextDojo] Starting Session with Agent ID:", agentId);
+      
       const conversation = await Conversation.startSession({
         agentId: agentId, 
         onConnect: () => {
+          console.log("[ContextDojo] Connected to ElevenLabs");
           setIsConnected(true);
           setShowConfig(false);
+          setStatusMsg('');
+          userSpeechBuffer.current = '';
         },
         onDisconnect: () => {
+          console.log("[ContextDojo] Disconnected");
           setIsConnected(false);
           setIsSpeaking(false);
+          setStatusMsg('');
         },
         onError: (error: any) => {
-          console.error("ElevenLabs Error:", error);
-          alert("Failed to connect. Check Agent ID.");
+          console.error("[ContextDojo] ElevenLabs Error:", error);
+          alert("Connection Error. Check Console.");
           setIsConnected(false);
+          setStatusMsg('Error');
         },
         onModeChange: (mode: { mode: string }) => {
+           // 'speaking' = Agent is speaking
+           // 'listening' = Agent is listening (User is speaking)
+           console.log("[ContextDojo] Mode Change:", mode);
            const isAgentSpeaking = mode.mode === 'speaking';
            setIsSpeaking(isAgentSpeaking);
-           
+
            if (isAgentSpeaking) {
-               // Agent started speaking
-               if (stopTimeoutRef.current) clearTimeout(stopTimeoutRef.current);
-               callbacksRef.current.onAgentStartedSpeaking();
+               // Agent JUST STARTED speaking. 
+               // This means User is DONE. Commit User Buffer.
+               if (userSpeechBuffer.current && userSpeechBuffer.current.trim().length > 0) {
+                   console.log("[ContextDojo] Committing User Turn:", userSpeechBuffer.current);
+                   onUserTurnCompleteRef.current(userSpeechBuffer.current);
+                   userSpeechBuffer.current = ''; // Clear buffer
+               }
            } else {
-               // Agent stopped speaking - Wait longer (1.5s) to ensure text chunks arrive
-               if (stopTimeoutRef.current) clearTimeout(stopTimeoutRef.current);
-               stopTimeoutRef.current = setTimeout(() => {
-                   callbacksRef.current.onAgentStoppedSpeaking();
-               }, 1500); 
+               // Agent JUST STOPPED speaking (went to listening mode).
+               // This means Agent Turn is DONE.
+               // We trigger the analysis hook.
+               console.log("[ContextDojo] Agent Finished Speaking - End of Cycle");
+               onTurnCompleteRef.current();
            }
         },
         onMessage: (props: any) => {
-            const text = props.message || props.text;
-            if (!text) return;
+            // Debug log to see exactly what we get
+            // console.log("[ContextDojo] Message:", props);
 
-            if (props.source === 'user') {
-                callbacksRef.current.onUserTranscript(text);
-            } else if (props.source === 'ai') {
-                callbacksRef.current.onAgentResponse(text);
+            const text = props.text || props.message || "";
+            const source = props.source;
+
+            if (source === 'user') {
+                // Real-time user transcript
+                if (text) {
+                    userSpeechBuffer.current = text; // Update buffer
+                    onUserTranscriptRef.current(text); // Update UI
+                }
+            } else if (source === 'ai' || source === 'character' || source === 'assistant') {
+                // Real-time agent transcript
+                // Handle different source names depending on SDK version
+                if (text) {
+                    onAgentResponseRef.current(text);
+                }
             }
         }
       } as any);
@@ -111,9 +150,10 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
 
     } catch (error) {
       console.error("Failed to start conversation:", error);
-      alert("Microphone access failed or Agent connection error.");
+      setStatusMsg('Connection Failed');
+      setIsConnected(false);
     }
-  };
+  }, [agentId]);
 
   const endConversation = async () => {
     if (conversationRef.current) {
@@ -121,6 +161,7 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
       conversationRef.current = null;
     }
     setIsConnected(false);
+    setIsSpeaking(false);
   };
 
   return (
@@ -141,13 +182,13 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
                     </div>
                     {agentId && (
                          <button onClick={() => setShowConfig(false)} className="text-xs text-blue-400 hover:text-blue-300 underline self-end mt-1">
-                            Done
+                            {labels.done}
                          </button>
                     )}
                 </div>
             ) : (
                 <button onClick={() => setShowConfig(true)} className="flex items-center justify-end gap-1 text-xs text-slate-500 hover:text-slate-300 w-full mb-2">
-                    <span>Config Agent ID</span>
+                    <span>{labels.configAgent}</span>
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
                         <path fillRule="evenodd" d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1 1.187-.447l1.598.54A6.993 6.993 0 0 1 7.51 3.456l.33-1.652ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clipRule="evenodd" />
                     </svg>
@@ -176,10 +217,10 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
       </div>
       <div className="text-center">
          <h3 className="text-white font-bold text-sm">
-             {isConnected ? (isSpeaking ? "Agent Speaking..." : "Listening...") : "Voice Mode"}
+             {isConnected ? (isSpeaking ? labels.agentSpeaking : labels.listening) : labels.voiceMode}
          </h3>
          <p className="text-xs text-slate-400">
-             {isConnected ? "Speak naturally" : "Tap to connect"}
+             {statusMsg || (isConnected ? labels.speakNaturally : labels.tapToConnect)}
          </p>
       </div>
     </div>

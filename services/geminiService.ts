@@ -172,6 +172,7 @@ export const generateGraphUpdates = async (
         - Labels must be concise (1-3 words).
         - 'parent': Match strictly to one of the [Recent Nodes]. If no good match, use 'Context'.
         - 'type': 'concept', 'entity', 'action', 'emotion'.
+        - 'description': A short, 1-sentence hint on what to discuss or why this topic is relevant.
         
         OUTPUT JSON ONLY.
         `;
@@ -192,9 +193,10 @@ export const generateGraphUpdates = async (
                                     label: { type: Type.STRING },
                                     type: { type: Type.STRING, enum: ['concept', 'entity', 'action', 'emotion'] },
                                     status: { type: Type.STRING, enum: ['active', 'potential'] },
-                                    parent: { type: Type.STRING }
+                                    parent: { type: Type.STRING },
+                                    description: { type: Type.STRING }
                                 },
-                                required: ['label', 'type', 'status', 'parent']
+                                required: ['label', 'type', 'status', 'parent', 'description']
                             }
                         }
                     }

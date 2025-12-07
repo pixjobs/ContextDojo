@@ -4,6 +4,7 @@ export interface MindMapNode {
   group: number; 
   type: 'root' | 'concept' | 'entity' | 'action' | 'emotion';
   status: 'active' | 'potential';
+  description?: string; // Why this node is here / What to discuss
 }
 
 export interface MindMapLink {
@@ -43,5 +44,6 @@ export interface GraphUpdate {
     type: 'concept' | 'entity' | 'action' | 'emotion';
     status: 'active' | 'potential';
     parent: string;
+    description: string;
   }[];
 }

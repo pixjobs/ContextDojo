@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage } from '../types';
+import { LabelSet } from '../constants/translations';
 
 interface ChatInterfaceProps {
   history: ChatMessage[];
@@ -7,6 +8,7 @@ interface ChatInterfaceProps {
   isLoading: boolean;
   streamingMessage?: string | null; // Agent streaming
   streamingUserText?: string | null; // User streaming
+  labels: LabelSet;
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ 
@@ -14,7 +16,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onSendMessage, 
   isLoading, 
   streamingMessage,
-  streamingUserText 
+  streamingUserText,
+  labels
 }) => {
   const [input, setInput] = useState('');
   const endOfMsgRef = useRef<HTMLDivElement>(null);
@@ -40,7 +43,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         {history.length === 0 && !streamingUserText && (
            <div className="flex flex-col items-center justify-center h-full text-center p-8 opacity-50">
                <div className="text-4xl mb-4">👋</div>
-               <p className="text-slate-400 text-sm">Say hello to start practicing.</p>
+               <p className="text-slate-400 text-sm">{labels.sayHello}</p>
            </div>
         )}
         
@@ -51,7 +54,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
           >
             <span className="text-[10px] text-slate-500 mb-1 px-1 uppercase tracking-wider">
-                {msg.role === 'user' ? 'You' : 'Dojo'}
+                {msg.role === 'user' ? labels.you : labels.dojo}
             </span>
             <div
               className={`max-w-[85%] rounded-2xl px-5 py-3 text-sm leading-relaxed shadow-sm ${
@@ -68,7 +71,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         {/* Render Streaming User Text */}
         {streamingUserText && (
           <div className="flex flex-col items-end">
-            <span className="text-[10px] text-blue-400 mb-1 px-1 uppercase tracking-wider animate-pulse">Listening...</span>
+            <span className="text-[10px] text-blue-400 mb-1 px-1 uppercase tracking-wider animate-pulse">{labels.listening}</span>
             <div className="max-w-[85%] rounded-2xl px-5 py-3 text-sm leading-relaxed bg-blue-600/20 border border-blue-500/30 text-blue-100 rounded-tr-none italic backdrop-blur-sm">
               {streamingUserText}
               <span className="inline-block w-1.5 h-3 ml-1 bg-blue-400 animate-pulse"></span>
@@ -79,7 +82,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         {/* Render Streaming Agent Response */}
         {streamingMessage && (
            <div className="flex flex-col items-start">
-             <span className="text-[10px] text-emerald-400 mb-1 px-1 uppercase tracking-wider animate-pulse">Thinking...</span>
+             <span className="text-[10px] text-emerald-400 mb-1 px-1 uppercase tracking-wider animate-pulse">{labels.thinking}</span>
              <div className="max-w-[85%] rounded-2xl px-5 py-3 text-sm leading-relaxed bg-slate-800/80 border border-emerald-500/30 text-slate-200 rounded-tl-none backdrop-blur-sm">
                {streamingMessage}
                <span className="inline-block w-1.5 h-3 ml-1 bg-emerald-400 animate-pulse"></span>
@@ -106,7 +109,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type a message..."
+            placeholder={labels.typePlaceholder}
             className="w-full bg-slate-950 border border-slate-700 text-slate-200 rounded-xl pl-4 pr-12 py-3 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder-slate-600 text-sm shadow-inner transition-all"
             disabled={isLoading || !!streamingMessage || !!streamingUserText}
           />

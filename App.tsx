@@ -5,9 +5,10 @@ import MindMap from './components/MindMap';
 import ChatInterface from './components/ChatInterface';
 import VoiceWidget from './components/VoiceWidget';
 import EnglishTranscript from './components/EnglishTranscript';
+import { TRANSLATIONS, Language, LabelSet } from './constants/translations';
 
 const INITIAL_NODES: MindMapNode[] = [
-  { id: 'Context', label: 'Context', group: 1, type: 'root', status: 'active' }
+  { id: 'Context', label: 'Context', group: 1, type: 'root', status: 'active', description: 'The starting point of our conversation.' }
 ];
 
 const INITIAL_STATE: DojoState = {
@@ -30,12 +31,17 @@ function App() {
   const [dojoState, setDojoState] = useState<DojoState>(INITIAL_STATE);
   const [isProcessing, setIsProcessing] = useState(false);
   const [openSection, setOpenSection] = useState<string | null>('transcript');
+  
+  // Language State
+  const [uiLanguage, setUiLanguage] = useState<Language>('en');
+  const labels: LabelSet = TRANSLATIONS[uiLanguage];
 
   // Streaming States
   const [streamingUser, setStreamingUser] = useState<string>('');
   const [streamingAgent, setStreamingAgent] = useState<string>('');
   
-  const streamingUserRef = useRef<string>('');
+  // We use a Ref to accumulate the Agent's text during streaming, 
+  // so we have the full text ready when onTurnComplete fires.
   const streamingAgentRef = useRef<string>('');
 
   // --- DOWNLOAD HANDLER ---
@@ -65,12 +71,14 @@ function App() {
       
       const updates = await generateGraphUpdates(conversationText, activeLabels);
       
-      if (updates.nodes && updates.nodes.length > 0) {
+      if (updates && updates.nodes && updates.nodes.length > 0) {
           setDojoState(prev => {
               const nextNodes = [...prev.mindMapNodes];
               const nextLinks = [...prev.mindMapLinks];
               
               updates.nodes.forEach(n => {
+                  if (!n.label) return; // Skip invalid
+                  
                   const existingNodeIndex = nextNodes.findIndex(ex => ex.label.toLowerCase() === n.label.toLowerCase());
 
                   if (existingNodeIndex !== -1) {
@@ -79,9 +87,11 @@ function App() {
                       
                       // If existing was potential and new is active, upgrade it
                       if (existingNode.status === 'potential' && n.status === 'active') {
-                           nextNodes[existingNodeIndex] = { ...existingNode, status: 'active' };
+                           nextNodes[existingNodeIndex] = { ...existingNode, status: 'active', description: n.description };
+                      } else if (n.description) {
+                           // Update description if newer
+                           nextNodes[existingNodeIndex] = { ...existingNode, description: n.description };
                       }
-                      // Do not downgrade active to potential
                   } else {
                       // Create New Node
                       const newNode: MindMapNode = {
@@ -89,12 +99,13 @@ function App() {
                           label: n.label,
                           type: n.type,
                           status: n.status as 'active' | 'potential',
-                          group: 2
+                          group: 2,
+                          description: n.description
                       };
                       nextNodes.push(newNode);
                       
                       // Create Link
-                      const parentNode = nextNodes.find(ex => ex.label.toLowerCase() === n.parent.toLowerCase()) 
+                      const parentNode = nextNodes.find(ex => ex.label.toLowerCase() === (n.parent || '').toLowerCase()) 
                                          || nextNodes.find(ex => ex.label === 'Context'); 
                       
                       if (parentNode) {
@@ -158,94 +169,115 @@ function App() {
     }
   }, [dojoState.conversationHistory, dojoState.mode, dojoState.mindMapNodes]); 
 
-  // --- VOICE HANDLERS ---
+  // --- VOICE HANDLERS (Memoized to prevent Widget re-renders) ---
   
-  const handleVoiceUserTranscript = (text: string) => {
-      streamingUserRef.current = text;
+  // 1. Visual Stream Update
+  const handleVoiceUserTranscript = useCallback((text: string) => {
       setStreamingUser(text);
-  };
+  }, []);
 
-  const handleAgentStartedSpeaking = () => {
-      const finalText = streamingUserRef.current;
-      setStreamingUser('');
-      streamingUserRef.current = '';
-
-      if (finalText) {
-          const userMsg: ChatMessage = { role: 'user', text: finalText, timestamp: new Date() };
-          setDojoState(state => ({
-              ...state,
-              conversationHistory: [...state.conversationHistory, userMsg]
-          }));
-      }
-  };
-
-  const handleVoiceAgentResponse = (text: string) => {
+  // 2. Agent Stream Update
+  const handleVoiceAgentResponse = useCallback((text: string) => {
       streamingAgentRef.current += text;
       setStreamingAgent(prev => prev + text);
-  };
+  }, []);
 
-  const handleAgentStoppedSpeaking = async () => {
+  // 3. Commit User Turn (Immediate when Agent Interrupts or Session signals end of turn)
+  const handleVoiceUserTurnComplete = useCallback((text: string) => {
+      setStreamingUser(''); // Clear streaming UI as we commit to history
+      
+      if (!text) return;
+
+      const userMsg: ChatMessage = { 
+          role: 'user', 
+          text: text, 
+          translatedText: undefined, // Pending Gemini analysis
+          timestamp: new Date() 
+      };
+      
+      setDojoState(prev => ({
+          ...prev,
+          conversationHistory: [...prev.conversationHistory, userMsg]
+      }));
+  }, []);
+
+  // 4. Commit Agent Turn (End of cycle)
+  const handleAgentTurnComplete = useCallback(async () => {
       const finalText = streamingAgentRef.current;
       setStreamingAgent('');
       streamingAgentRef.current = '';
 
-      if (!finalText) return;
+      if (!finalText) {
+          // Sometimes 11Labs might send audio but empty text if it was non-verbal? 
+          // Just return to be safe.
+          return;
+      }
 
       const agentMsg: ChatMessage = { role: 'model', text: finalText, timestamp: new Date() };
       
-      // Add Agent Msg to history
-      setDojoState(state => ({
-          ...state,
-          conversationHistory: [...state.conversationHistory, agentMsg]
-      }));
+      // A. Add Agent Msg to history state immediately
+      let currentHistoryForAnalysis: ChatMessage[] = [];
+      setDojoState(state => {
+          const updatedHist = [...state.conversationHistory, agentMsg];
+          currentHistoryForAnalysis = updatedHist; // Capture for use in async
+          return { ...state, conversationHistory: updatedHist };
+      });
 
       setIsProcessing(true);
       try {
+          // B. Find the last user message to analyze context
           let lastUserText = "User input";
-          const hist = dojoState.conversationHistory;
-          for (let i = hist.length - 1; i >= 0; i--) {
-              if (hist[i].role === 'user') {
-                  lastUserText = hist[i].text;
+          for (let i = currentHistoryForAnalysis.length - 1; i >= 0; i--) {
+              if (currentHistoryForAnalysis[i].role === 'user') {
+                  lastUserText = currentHistoryForAnalysis[i].text;
                   break;
               }
           }
 
+          // C. Run Gemini Analysis
           const brainData = await analyzeInteraction(
               lastUserText, 
               finalText, 
-              [...dojoState.conversationHistory, agentMsg], 
-              dojoState.mode
+              currentHistoryForAnalysis, 
+              dojoState.mode || 'adaptive'
           );
           
+          // D. Update History with Translations
           setDojoState(prev => {
-              const hist = [...prev.conversationHistory];
+              const newHist = [...prev.conversationHistory];
               
-              const userIdx = hist.map(m => m.role).lastIndexOf('user');
+              // Find matching user message to update translation
+              const userIdx = newHist.map(m => m.role).lastIndexOf('user');
               if (userIdx !== -1) {
-                  hist[userIdx] = { ...hist[userIdx], translatedText: brainData.english_user_translation };
+                  // Only update if it doesn't have translation yet
+                  const msg = newHist[userIdx];
+                  if (!msg.translatedText) {
+                       newHist[userIdx] = { ...msg, translatedText: brainData.english_user_translation };
+                  }
               }
               
-              const agentIdx = hist.map(m => m.role).lastIndexOf('model');
+              // Find matching agent message
+              const agentIdx = newHist.map(m => m.role).lastIndexOf('model');
               if (agentIdx !== -1) {
-                  hist[agentIdx] = { ...hist[agentIdx], translatedText: brainData.english_agent_translation };
+                   newHist[agentIdx] = { ...newHist[agentIdx], translatedText: brainData.english_agent_translation };
               }
               
               return {
                   ...prev,
-                  conversationHistory: hist,
+                  conversationHistory: newHist,
                   lastGuidance: brainData.coach_guidance || null
               };
           });
 
-          // Update Graph
-          triggerGraphUpdate(`User: ${lastUserText}\nAgent: ${finalText}`);
+          // E. Update Graph
+          await triggerGraphUpdate(`User: ${lastUserText}\nAgent: ${finalText}`);
 
       } catch (err) {
           console.error("Analysis Error", err);
       } finally {
           setIsProcessing(false);
       }
-  };
+  }, [dojoState.mode]); 
 
   const handleReset = () => {
     setDojoState({
@@ -254,7 +286,6 @@ function App() {
     });
     setStreamingUser('');
     setStreamingAgent('');
-    streamingUserRef.current = '';
     streamingAgentRef.current = '';
     setOpenSection('transcript');
   };
@@ -271,12 +302,34 @@ function App() {
            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-teal-400 flex items-center justify-center text-white font-bold text-lg shadow-lg">
              C
            </div>
-           <h1 className="text-xl font-bold tracking-tight text-slate-100">
-            ContextDojo
+           <h1 className="text-xl font-bold tracking-tight text-slate-100 hidden sm:block">
+            {labels.appTitle}
            </h1>
         </div>
         
         <div className="flex gap-4 items-center">
+            {/* Language Toggle */}
+            <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700">
+               <button 
+                  onClick={() => setUiLanguage('en')}
+                  className={`px-2 py-1 text-xs font-bold rounded ${uiLanguage === 'en' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+               >
+                 EN
+               </button>
+               <button 
+                  onClick={() => setUiLanguage('zh')}
+                  className={`px-2 py-1 text-xs font-bold rounded ${uiLanguage === 'zh' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+               >
+                 中
+               </button>
+               <button 
+                  onClick={() => setUiLanguage('de')}
+                  className={`px-2 py-1 text-xs font-bold rounded ${uiLanguage === 'de' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+               >
+                 DE
+               </button>
+            </div>
+
             <button 
                 onClick={handleDownload}
                 className="flex items-center gap-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-md border border-slate-700 transition-colors"
@@ -285,13 +338,13 @@ function App() {
                   <path d="M10.75 2.75a.75.75 0 0 0-1.5 0v8.614L6.295 8.235a.75.75 0 1 0-1.09 1.03l4.25 4.5a.75.75 0 0 0 1.09 0l4.25-4.5a.75.75 0 0 0-1.09-1.03l-2.955 3.129V2.75Z" />
                   <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
                 </svg>
-                Save
+                {labels.save}
             </button>
             <button 
                 onClick={handleReset}
                 className="text-xs font-medium text-slate-400 hover:text-white px-3 py-1.5 rounded-md hover:bg-slate-800 transition-colors"
             >
-                Clear
+                {labels.clear}
             </button>
         </div>
       </header>
@@ -314,7 +367,7 @@ function App() {
                              <path fillRule="evenodd" d="M1.5 4.5a3 3 0 0 1 3-3h1.372c.86 0 1.61.586 1.819 1.42l1.105 4.423a1.875 1.875 0 0 1-.694 1.955l-1.293.97c-.135.101-.164.249-.126.352a11.285 11.285 0 0 0 6.697 6.697c.103.038.25.009.352-.126l.97-1.293a1.875 1.875 0 0 1 1.955-.694l4.423 1.105c.834.209 1.42.959 1.42 1.82V19.5a3 3 0 0 1-3 3h-2.25C8.552 22.5 1.5 15.448 1.5 6.75V4.5Z" clipRule="evenodd" />
                            </svg>
                         </div>
-                        <span className={`font-semibold text-sm ${openSection === 'map' ? 'text-white' : 'text-slate-400'}`}>Context Galaxy</span>
+                        <span className={`font-semibold text-sm ${openSection === 'map' ? 'text-white' : 'text-slate-400'}`}>{labels.contextTree}</span>
                     </div>
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 text-slate-500 transition-transform ${openSection === 'map' ? 'rotate-180' : ''}`}>
                        <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
@@ -324,7 +377,11 @@ function App() {
                 {openSection === 'map' && (
                     <div className="flex-1 min-h-0 relative overflow-hidden rounded-b-xl animate-fade-in">
                        <div className="absolute inset-0 bg-grid-slate-800/[0.05] bg-[bottom_1px_center]" style={{ backgroundSize: '24px 24px' }}></div>
-                       <MindMap nodes={dojoState.mindMapNodes} links={dojoState.mindMapLinks} />
+                       <MindMap 
+                          nodes={dojoState.mindMapNodes} 
+                          links={dojoState.mindMapLinks} 
+                          labels={labels}
+                        />
                     </div>
                 )}
             </div>
@@ -342,7 +399,7 @@ function App() {
                              <path d="M12.971 1.816A5.23 5.23 0 0 1 14.25 5.25v1.875c0 .207.168.375.375.375H16.5a5.23 5.23 0 0 1 3.434 1.279 9.768 9.768 0 0 0-6.963-6.963Z" />
                            </svg>
                         </div>
-                        <span className={`font-semibold text-sm ${openSection === 'transcript' ? 'text-white' : 'text-slate-400'}`}>English Transcript</span>
+                        <span className={`font-semibold text-sm ${openSection === 'transcript' ? 'text-white' : 'text-slate-400'}`}>{labels.transcriptTitle}</span>
                     </div>
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 text-slate-500 transition-transform ${openSection === 'transcript' ? 'rotate-180' : ''}`}>
                        <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
@@ -366,6 +423,8 @@ function App() {
                        <EnglishTranscript 
                            history={dojoState.conversationHistory} 
                            streamingAgent={streamingAgent}
+                           streamingUser={streamingUser}
+                           labels={labels}
                        />
                     </div>
                 )}
@@ -378,8 +437,9 @@ function App() {
              <VoiceWidget 
                   onUserTranscript={handleVoiceUserTranscript}
                   onAgentResponse={handleVoiceAgentResponse}
-                  onAgentStartedSpeaking={handleAgentStartedSpeaking}
-                  onAgentStoppedSpeaking={handleAgentStoppedSpeaking}
+                  onUserTurnComplete={handleVoiceUserTurnComplete}
+                  onTurnComplete={handleAgentTurnComplete}
+                  labels={labels}
              />
              
              <div className="flex-1 overflow-hidden shadow-2xl rounded-2xl border border-slate-800 bg-slate-900/80 backdrop-blur-md">
@@ -389,6 +449,7 @@ function App() {
                    isLoading={isProcessing}
                    streamingMessage={streamingAgent}
                    streamingUserText={streamingUser}
+                   labels={labels}
                  />
              </div>
           </div>
